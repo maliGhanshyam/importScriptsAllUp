@@ -1,0 +1,51 @@
+# Node.js dependencies
+node_modules/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment variable files
+.env
+.env.* 
+
+# OS / Editor junk
+.DS_Store
+Thumbs.db
+
+# VSCode settings (optional)
+.vscode/
+
+# Database dumps or temp SQL files
+*.sql
+*.sqlite
+*.db
+
+# npm package lock (optional: only if you prefer)
+# package-lock.json
+# yarn.lock
+
+# Coverage / testing
+coverage/
+.nyc_output/
+
+# Build artifacts
+dist/
+build/
+
+# Temporary files
+tmp/
+temp/
+
+# PM2 process logs
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# MariaDB socket files (if any, local UNIX socket usage)
+*.sock
