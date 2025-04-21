@@ -210,11 +210,11 @@ class MariaDBDockerManager {
                     \`source\` VARCHAR(255) NULL,
                     is_email_verified BOOLEAN DEFAULT FALSE NOT NULL,
                     phone_number VARCHAR(20) NULL,
-                    lead_type ENUM('type1', 'type2', 'type3') NULL,
-                    lead_status ENUM('status1', 'status2', 'status3') NULL,
+                    lead_type ENUM('TELEPHONE_ENQUIRY', 'MARKETING', 'SELF_GENERATED', 'WALK_IN') NULL,
+                    lead_status ENUM('NEW_MEMBER', 'RENEWED_MEMBER', 'EXPIRED', 'CANCELLED', 'HOT' ) NULL DEFAULT 'NEW_MEMBER' ,
                     status ENUM('ACTIVE', 'INACTIVE') DEFAULT 'ACTIVE' NOT NULL,
                     lead_status_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
-                    work_status ENUM('status1', 'status2') NULL,
+                    work_status VARCHAR(255) NULL,
                     job_title VARCHAR(255) NULL,
                     marketing_consent_sms BOOLEAN DEFAULT FALSE NOT NULL,
                     marketing_consent_email BOOLEAN DEFAULT FALSE NOT NULL,
@@ -426,7 +426,8 @@ class MariaDBDockerManager {
                     created_at,
                     updated_at,
                     created_by,     
-                    last_updated_by 
+                    last_updated_by,
+                    lead_created_by
                 )
                 SELECT
                     c.first_name,
@@ -443,7 +444,8 @@ class MariaDBDockerManager {
                     NOW() AS created_at,
                     NOW() AS updated_at,
                     c.created_by, 
-                    c.last_updated_by  
+                    c.last_updated_by ,
+                    c.created_by
                 FROM customers c
                 LEFT JOIN countries co ON c.country_id = co.id
                 WHERE c.batch_no = ?
@@ -476,22 +478,9 @@ class MariaDBDockerManager {
      */
     async migrateImportedLeads() {
         try {
-            // First insert the leads
-            // const insertResult = await this.query(`
-            //     INSERT INTO leads (first_name, last_name, email, phone_number, nationality, source, batch_no)
-            //     SELECT 
-            //         SUBSTRING_INDEX(name, ' ', 1) AS first_name, 
-            //         TRIM(SUBSTRING(name, LOCATE(' ', name) + 1)) AS last_name,
-            //         emailAddress AS email,
-            //         mobileNumber AS phone_number,
-            //         nationality,
-            //         leadSource AS source,
-            //         '${BATCH_CONFIG.LEADS_BATCH}' AS batch_no
-            //     FROM imported_leads
-            // `);
             const insertResult = await this.query(`
                 INSERT INTO leads (first_name, last_name, email, phone_number, nationality, source, batch_no,created_by,
-                    last_updated_by)
+                    last_updated_by,lead_created_by, lead_type)
                 SELECT 
                     SUBSTRING_INDEX(name, ' ', 1) AS first_name, 
                     TRIM(SUBSTRING(name, LOCATE(' ', name) + 1)) AS last_name,
@@ -501,7 +490,15 @@ class MariaDBDockerManager {
                     leadSource AS source,
                     '${BATCH_CONFIG.LEADS_BATCH}' AS batch_no,
 					a.id AS created_by,
-                    a.id AS last_updated_by
+                    a.id AS last_updated_by,
+                    a.id AS created_by,
+                        CASE 
+                    WHEN imported_leads.leadType = 'WI' THEN 'WALK_IN'
+                    WHEN imported_leads.leadType = 'MARKETING' THEN 'MARKETING'
+                    WHEN imported_leads.leadType = 'Tel' THEN 'TELEPHONE_ENQUIRY'
+                    WHEN imported_leads.leadType = 'MS Self Generated' THEN 'SELF_GENERATED'
+                    ELSE NULL
+                END AS lead_type
                 FROM imported_leads
 				LEFT JOIN admins a ON imported_leads.salesPerson= a.first_name
             `);
