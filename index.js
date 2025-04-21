@@ -15,8 +15,8 @@ const DB_CONFIG = {
 
 // Batch identifiers
 const BATCH_CONFIG = {
-    CUSTOMERS_BATCH: 'UFCMBZ_customers_14APR25_1',
-    LEADS_BATCH: 'UFCMBZ_leads_14APR25_1'
+    CUSTOMERS_BATCH: 'UFCMBZ_customers_21APR25_1',
+    LEADS_BATCH: 'UFCMBZ_leads_21APR25_1'
 };
 
 // Default values
@@ -203,7 +203,7 @@ class MariaDBDockerManager {
                     description VARCHAR(255) NULL,
                     dob DATE NULL,
                     nationality VARCHAR(255) NULL,
-                    gender VARCHAR(50) DEFAULT 'ACTIVE',
+                    gender VARCHAR(50) DEFAULT 'any',
                     address VARCHAR(255) NULL,
                     photo VARCHAR(255) NULL,
                     email VARCHAR(255) NULL,
@@ -427,7 +427,9 @@ class MariaDBDockerManager {
                     updated_at,
                     created_by,     
                     last_updated_by,
-                    lead_created_by
+                    lead_created_by,
+                    dob,
+                    gender
                 )
                 SELECT
                     c.first_name,
@@ -445,7 +447,9 @@ class MariaDBDockerManager {
                     NOW() AS updated_at,
                     c.created_by, 
                     c.last_updated_by ,
-                    c.created_by
+                    c.created_by,
+                    dob,
+                    gender
                 FROM customers c
                 LEFT JOIN countries co ON c.country_id = co.id
                 WHERE c.batch_no = ?
