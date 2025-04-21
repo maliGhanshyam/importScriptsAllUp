@@ -9,8 +9,8 @@ const DB_CONFIG = {
     port: 3306,
     user: 'root',
     password: 'password',
-    database: 'membersDb',
-    connectionLimit: 5
+    database: 'testScriptDb',
+    connectionLimit: 1
 };
 
 // Batch identifiers
@@ -22,6 +22,12 @@ const BATCH_CONFIG = {
 // Default values
 const DEFAULT_VALUES = {
     GYM_ID: 'dcd01f7c-9d1c-4ed1-93b3-aa845686eb4b',
+    ADMIN_EMAIL: 'team.import@gmail.com',
+    ADMIN_FIRST_NAME: 'Import',
+    ADMIN_LAST_NAME: 'Team',
+    DEFAULT_COUNTRY_ID: 1, // UAE
+    DEFAULT_STATUS: 'ACTIVE',
+    DEFAULT_SOURCE: 'MIGRATION'
 };
 
 
@@ -275,23 +281,23 @@ class MariaDBDockerManager {
     async initializeSampleData() {
         try {
             // Insert admin data
-            await this.query(`
-                INSERT INTO admins (
-                    first_name,
-                    last_name,
-                    email,
-                    status,
-                    created_by,
-                    last_updated_by
-                ) VALUES (
-                    'Import',
-                    'Team',
-                    'team.import@gmail.com',
-                    'ACTIVE',
-                    1,
-                    1
-                )
-            `);
+            // await this.query(`
+            //     INSERT INTO admins (
+            //         first_name,
+            //         last_name,
+            //         email,
+            //         status,
+            //         created_by,
+            //         last_updated_by
+            //     ) VALUES (
+            //         'Import',
+            //         'Team',
+            //         'team.import@gmail.com',
+            //         'ACTIVE',
+            //         1,
+            //         1
+            //     )
+            // `);
 
             // Insert country data
             await this.query(`
@@ -348,8 +354,15 @@ class MariaDBDockerManager {
      * Migrate data from member table to customers table
      */
     async migrateMemberToCustomers() {
+        let conn;
         try {
-            const result = await this.query(`
+            conn = await this.pool.getConnection();
+            
+            // Start transaction
+            await conn.beginTransaction();
+
+            // 1. First insert into customers table
+            const customerInsertResult = await conn.query(`
                 INSERT INTO customers (
                     first_name,
                     last_name,
@@ -359,19 +372,25 @@ class MariaDBDockerManager {
                     status,
                     gender,
                     dob,
-                    batch_no
+                    batch_no,
+                    created_by,
+                    last_updated_by
                 )
                 SELECT
                     SUBSTRING_INDEX(m.member, ' ', 1) AS first_name,
-                    SUBSTRING_INDEX(m.member, ' ', -1) AS last_name,
+                    CASE 
+                        WHEN INSTR(m.member, ' ') > 0 
+                        THEN SUBSTRING(m.member, INSTR(m.member, ' ') + 1)
+                        ELSE NULL
+                    END AS last_name,
                     m.email,
                     m.phone,
                     CASE 
-                        WHEN m.nationality = 'United Arab Emirates' THEN 1
+                        WHEN m.nationality = 'United Arab Emirates' THEN ?
                         ELSE NULL
                     END AS country_id,
                     CASE 
-                        WHEN m.status = 'Active' THEN 'ACTIVE'
+                        WHEN m.status = 'Active' THEN ?
                         ELSE 'INACTIVE'
                     END AS status,
                     CASE 
@@ -380,27 +399,99 @@ class MariaDBDockerManager {
                         ELSE NULL
                     END AS gender,
                     m.birthDay,
-                    '${BATCH_CONFIG.CUSTOMERS_BATCH}' AS batch_no
+                    ? AS batch_no,
+                    a.id AS created_by,
+                    a.id AS last_updated_by
                 FROM
                     member m
-            `);
+                LEFT JOIN admins a ON m.sales = a.first_name
+            `, [DEFAULT_VALUES.DEFAULT_COUNTRY_ID, DEFAULT_VALUES.DEFAULT_STATUS, BATCH_CONFIG.CUSTOMERS_BATCH]);
             
-            console.log(`Migrated ${result.affectedRows} records from member to customers`);
-            return result;
+            console.log(`Inserted ${customerInsertResult.affectedRows} records into customers table`);
+
+            // 2. Now insert corresponding records into leads table
+            const leadInsertResult = await conn.query(`
+                INSERT INTO leads (
+                    first_name,
+                    last_name,
+                    email,
+                    phone_number,
+                    nationality,
+                    source,
+                    batch_no,
+                    customer_id,
+                    status,
+                    country_id,
+                    gym_id,
+                    created_at,
+                    updated_at,
+                    created_by,     
+                    last_updated_by 
+                )
+                SELECT
+                    c.first_name,
+                    c.last_name,
+                    c.email,
+                    c.contact_number,
+                    co.name AS nationality,
+                    ? AS source,
+                    ? AS batch_no,
+                    c.id AS customer_id,
+                    c.status,
+                    c.country_id,
+                    ? AS gym_id,
+                    NOW() AS created_at,
+                    NOW() AS updated_at,
+                    c.created_by, 
+                    c.last_updated_by  
+                FROM customers c
+                LEFT JOIN countries co ON c.country_id = co.id
+                WHERE c.batch_no = ?
+                AND NOT EXISTS (
+                    SELECT 1 FROM leads l WHERE l.customer_id = c.id
+                )
+            `, [DEFAULT_VALUES.DEFAULT_SOURCE, BATCH_CONFIG.LEADS_BATCH, DEFAULT_VALUES.GYM_ID, BATCH_CONFIG.CUSTOMERS_BATCH]);
+
+            console.log(`Inserted ${leadInsertResult.affectedRows} corresponding records into leads table`);
+
+            // Commit transaction
+            await conn.commit();
+
+            return {
+                customers: customerInsertResult.affectedRows,
+                leads: leadInsertResult.affectedRows
+            };
+            
         } catch (err) {
+            // Rollback transaction if error occurs
+            if (conn) await conn.rollback();
             console.error('Error migrating member data:', err);
             throw err;
+        } finally {
+            if (conn) conn.release();
         }
     }
-
     /**
      * Migrate data from imported_leads to leads table
      */
     async migrateImportedLeads() {
         try {
             // First insert the leads
+            // const insertResult = await this.query(`
+            //     INSERT INTO leads (first_name, last_name, email, phone_number, nationality, source, batch_no)
+            //     SELECT 
+            //         SUBSTRING_INDEX(name, ' ', 1) AS first_name, 
+            //         TRIM(SUBSTRING(name, LOCATE(' ', name) + 1)) AS last_name,
+            //         emailAddress AS email,
+            //         mobileNumber AS phone_number,
+            //         nationality,
+            //         leadSource AS source,
+            //         '${BATCH_CONFIG.LEADS_BATCH}' AS batch_no
+            //     FROM imported_leads
+            // `);
             const insertResult = await this.query(`
-                INSERT INTO leads (first_name, last_name, email, phone_number, nationality, source, batch_no)
+                INSERT INTO leads (first_name, last_name, email, phone_number, nationality, source, batch_no,created_by,
+                    last_updated_by)
                 SELECT 
                     SUBSTRING_INDEX(name, ' ', 1) AS first_name, 
                     TRIM(SUBSTRING(name, LOCATE(' ', name) + 1)) AS last_name,
@@ -408,8 +499,11 @@ class MariaDBDockerManager {
                     mobileNumber AS phone_number,
                     nationality,
                     leadSource AS source,
-                    '${BATCH_CONFIG.LEADS_BATCH}' AS batch_no
+                    '${BATCH_CONFIG.LEADS_BATCH}' AS batch_no,
+					a.id AS created_by,
+                    a.id AS last_updated_by
                 FROM imported_leads
+				LEFT JOIN admins a ON imported_leads.salesPerson= a.first_name
             `);
 
             // Update gym_id for leads
@@ -517,13 +611,13 @@ class MariaDBDockerManager {
 
         // Display some tables for verification
         console.log('\nAdmins table:');
-        await dbManager.displayTable('admins');
+        // await dbManager.displayTable('admins');
 
         console.log('\nCustomers table (first 10 rows):');
-        await dbManager.displayTable('customers');
+        // await dbManager.displayTable('customers');
 
         console.log('\nLeads table (first 10 rows):');
-        await dbManager.displayTable('leads');
+        // await dbManager.displayTable('leads');
 
     } catch (err) {
         console.error('Error in operations:', err);
