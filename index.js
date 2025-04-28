@@ -15,8 +15,8 @@ const DB_CONFIG = {
 
 // Batch identifiers
 const BATCH_CONFIG = {
-    CUSTOMERS_BATCH: 'UFCMBZ_customers_21APR25_1',
-    LEADS_BATCH: 'UFCMBZ_leads_21APR25_1'
+    CUSTOMERS_BATCH: 'UFCMBZ_customers_25APR25_1',
+    LEADS_BATCH: 'UFCMBZ_leads_25APR25_1'
 };
 
 // Default values
@@ -226,7 +226,17 @@ class MariaDBDockerManager {
                     is_member BOOLEAN DEFAULT FALSE NOT NULL,
                     is_recurring BOOLEAN DEFAULT FALSE NOT NULL,
                     membership_details JSON NULL,
-                    membership_status ENUM('status1', 'status2') NULL,
+                    membership_status ENUM(
+                        'active',
+                        'ended',
+                        'cancelled',
+                        'frozen',
+                        'terminated',
+                        'inactive',
+                        'upcoming',
+                        'transferred',
+                        'relocated'
+                        ) NULL,
                     membership_end_date TIMESTAMP NULL,
                     parq_health JSON NULL,
                     gfp_health JSON NULL,
@@ -481,10 +491,42 @@ class MariaDBDockerManager {
      * Migrate data from imported_leads to leads table
      */
     async migrateImportedLeads() {
+        let conn;
         try {
-            const insertResult = await this.query(`
-                INSERT INTO leads (first_name, last_name, email, phone_number, nationality, source, batch_no,created_by,
-                    last_updated_by,lead_created_by, lead_type)
+            conn = await this.pool.getConnection();
+            await conn.beginTransaction();
+    
+            // 1. Insert new customers - FIXED: Use parameter for gym_id
+            const customerResult = await conn.query(`
+                INSERT INTO customers (
+                    first_name, last_name, email, contact_number, 
+                    batch_no, status, gender, created_by,
+                    last_updated_by
+                )
+                SELECT 
+                    SUBSTRING_INDEX(name, ' ', 1) AS first_name, 
+                    TRIM(SUBSTRING(name, LOCATE(' ', name) + 1)) AS last_name,
+                    emailAddress AS email,
+                    mobileNumber AS contact_number,
+                    ? AS batch_no,
+                    'ACTIVE' AS status,
+                    'RATHER_NOT_SAY' AS gender,
+                    a.id AS created_by,
+                    a.id AS last_updated_by
+                FROM imported_leads
+                LEFT JOIN admins a ON imported_leads.salesPerson = a.first_name
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM customers 
+                    WHERE contact_number = imported_leads.mobileNumber
+                )`, [BATCH_CONFIG.LEADS_BATCH]);
+    
+            // 2. Insert leads - This part is correct
+            const leadsResult = await conn.query(`
+                INSERT INTO leads (
+                    first_name, last_name, email, phone_number, 
+                    nationality, source, batch_no, created_by,
+                    last_updated_by, lead_created_by, lead_type, gym_id
+                )
                 SELECT 
                     SUBSTRING_INDEX(name, ' ', 1) AS first_name, 
                     TRIM(SUBSTRING(name, LOCATE(' ', name) + 1)) AS last_name,
@@ -492,44 +534,45 @@ class MariaDBDockerManager {
                     mobileNumber AS phone_number,
                     nationality,
                     leadSource AS source,
-                    '${BATCH_CONFIG.LEADS_BATCH}' AS batch_no,
-					a.id AS created_by,
+                    ? AS batch_no,
+                    a.id AS created_by,
                     a.id AS last_updated_by,
                     a.id AS created_by,
-                        CASE 
-                    WHEN imported_leads.leadType = 'WI' THEN 'WALK_IN'
-                    WHEN imported_leads.leadType = 'MARKETING' THEN 'MARKETING'
-                    WHEN imported_leads.leadType = 'Tel' THEN 'TELEPHONE_ENQUIRY'
-                    WHEN imported_leads.leadType = 'MS Self Generated' THEN 'SELF_GENERATED'
-                    ELSE NULL
-                END AS lead_type
+                    CASE 
+                        WHEN imported_leads.leadType = 'WI' THEN 'WALK_IN'
+                        WHEN imported_leads.leadType = 'MARKETING' THEN 'MARKETING'
+                        WHEN imported_leads.leadType = 'Tel' THEN 'TELEPHONE_ENQUIRY'
+                        WHEN imported_leads.leadType = 'MS Self Generated' THEN 'SELF_GENERATED'
+                        ELSE NULL
+                    END AS lead_type,
+                    ? AS gym_id
                 FROM imported_leads
-				LEFT JOIN admins a ON imported_leads.salesPerson= a.first_name
-            `);
-
-            // Update gym_id for leads
-            await this.query(`
-                UPDATE leads  
-               SET gym_id = '${DEFAULT_VALUES.GYM_ID}' 
-                WHERE gym_id IS NULL
-            `);
-
-            // Update customer_id by joining with customers
-            const updateResult = await this.query(`
+                LEFT JOIN admins a ON imported_leads.salesPerson = a.first_name
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM leads 
+                    WHERE phone_number = imported_leads.mobileNumber
+                    AND batch_no = ?
+                )`, [BATCH_CONFIG.LEADS_BATCH, DEFAULT_VALUES.GYM_ID, BATCH_CONFIG.LEADS_BATCH]);
+    
+            // 3. Update customer_id in leads
+            const updateResult = await conn.query(`
                 UPDATE leads lc
-                INNER JOIN customers c
-                    ON lc.phone_number = c.contact_number
+                INNER JOIN customers c ON lc.phone_number = c.contact_number
                 SET lc.customer_id = c.id
-            `);
-
-            console.log(`Migrated ${insertResult.affectedRows} leads and updated ${updateResult.affectedRows} with customer IDs`);
-            return { insertResult, updateResult };
+                WHERE lc.customer_id IS NULL`);
+    
+            await conn.commit();
+            console.log(`Successfully migrated ${customerResult.affectedRows} customers and ${leadsResult.affectedRows} leads`);
+            return { customerResult, leadsResult, updateResult };
+            
         } catch (err) {
-            console.error('Error migrating leads data:', err);
+            if (conn) await conn.rollback();
+            console.error('Error in migration:', err);
             throw err;
+        } finally {
+            if (conn) conn.release();
         }
     }
-
     /**
      * Find unique sales persons not in admins
      */
@@ -608,7 +651,7 @@ class MariaDBDockerManager {
         await dbManager.migrateImportedLeads();
 
         // Step 5: Find unique sales persons not in admins
-        await dbManager.findUniqueSalesPersons();
+       // await dbManager.findUniqueSalesPersons();
 
         // Display some tables for verification
         console.log('\nAdmins table:');
