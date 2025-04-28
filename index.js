@@ -15,8 +15,8 @@ const DB_CONFIG = {
 
 // Batch identifiers
 const BATCH_CONFIG = {
-    CUSTOMERS_BATCH: 'UFCMBZ_customers_25APR25_1',
-    LEADS_BATCH: 'UFCMBZ_leads_25APR25_1'
+    CUSTOMERS_BATCH: 'UFCMBZ_customers_28APR25_1',
+    LEADS_BATCH: 'UFCMBZ_leads_28APR25_1'
 };
 
 // Default values
@@ -180,6 +180,7 @@ class MariaDBDockerManager {
                     external_id VARCHAR(255),
                     batch_no VARCHAR(255),
                     champ_id VARCHAR(255),
+                    customer_code VARCHAR(255),
                     FOREIGN KEY (city_id) REFERENCES country_cities(id),
                     FOREIGN KEY (country_id) REFERENCES countries(id)
                     ON DELETE CASCADE ON UPDATE CASCADE
@@ -384,7 +385,8 @@ class MariaDBDockerManager {
                     dob,
                     batch_no,
                     created_by,
-                    last_updated_by
+                    last_updated_by,
+                    customer_code
                 )
                 SELECT
                     SUBSTRING_INDEX(m.member, ' ', 1) AS first_name,
@@ -399,10 +401,7 @@ class MariaDBDockerManager {
                         WHEN m.nationality = 'United Arab Emirates' THEN ?
                         ELSE NULL
                     END AS country_id,
-                    CASE 
-                        WHEN m.status = 'Active' THEN ?
-                        ELSE 'INACTIVE'
-                    END AS status,
+                       'ACTIVE' AS status,
                     CASE 
                         WHEN m.gender = 'M' THEN 'MALE'
                         WHEN m.gender = 'F' THEN 'FEMALE'
@@ -411,11 +410,12 @@ class MariaDBDockerManager {
                     m.birthDay,
                     ? AS batch_no,
                     a.id AS created_by,
-                    a.id AS last_updated_by
+                    a.id AS last_updated_by,
+                   m.membershipCode as customer_code
                 FROM
                     member m
                 LEFT JOIN admins a ON m.sales = a.first_name
-            `, [DEFAULT_VALUES.DEFAULT_COUNTRY_ID, DEFAULT_VALUES.DEFAULT_STATUS, BATCH_CONFIG.CUSTOMERS_BATCH]);
+            `, [DEFAULT_VALUES.DEFAULT_COUNTRY_ID, BATCH_CONFIG.CUSTOMERS_BATCH]);
             
             console.log(`Inserted ${customerInsertResult.affectedRows} records into customers table`);
 
@@ -439,7 +439,9 @@ class MariaDBDockerManager {
                     last_updated_by,
                     lead_created_by,
                     dob,
-                    gender
+                    gender,
+                    customer_code,
+                    lead_status
                 )
                 SELECT
                     c.first_name,
@@ -458,8 +460,10 @@ class MariaDBDockerManager {
                     c.created_by, 
                     c.last_updated_by ,
                     c.created_by,
-                    dob,
-                    gender
+                    c.dob,
+                    c.gender,
+                    c.customer_code,
+                    'NEW_MEMBER' as lead_status
                 FROM customers c
                 LEFT JOIN countries co ON c.country_id = co.id
                 WHERE c.batch_no = ?
@@ -525,7 +529,8 @@ class MariaDBDockerManager {
                 INSERT INTO leads (
                     first_name, last_name, email, phone_number, 
                     nationality, source, batch_no, created_by,
-                    last_updated_by, lead_created_by, lead_type, gym_id
+                    last_updated_by, lead_created_by, lead_type, gym_id,
+                    lead_status
                 )
                 SELECT 
                     SUBSTRING_INDEX(name, ' ', 1) AS first_name, 
@@ -545,7 +550,8 @@ class MariaDBDockerManager {
                         WHEN imported_leads.leadType = 'MS Self Generated' THEN 'SELF_GENERATED'
                         ELSE NULL
                     END AS lead_type,
-                    ? AS gym_id
+                    ? AS gym_id,
+                    'HOT' as lead_status
                 FROM imported_leads
                 LEFT JOIN admins a ON imported_leads.salesPerson = a.first_name
                 WHERE NOT EXISTS (
