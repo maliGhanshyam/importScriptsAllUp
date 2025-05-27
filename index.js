@@ -366,61 +366,72 @@ class MariaDBDockerManager {
     /**
      * Migrate data from member table to customers table
      */
-    async migrateMemberToCustomers() {
-        let conn;
-        try {
-            conn = await this.pool.getConnection();
-            
-            // Start transaction
-            await conn.beginTransaction();
+async migrateMemberToCustomers() {
+    let conn;
+    try {
+        conn = await this.pool.getConnection();
+        
+        // Start transaction
+        await conn.beginTransaction();
 
-            // 1. First insert into customers table
-            const customerInsertResult = await conn.query(`
-INSERT INTO customers (
-    first_name,
-    last_name,
-    email,
-    contact_number,
-    country_id,
-    status,
-    gender,
-    dob,
-    batch_no,
-    created_by,
-    last_updated_by,
-    customer_code
-)
-SELECT
-    SUBSTRING_INDEX(m.member, ' ', 1) AS first_name,
-    CASE 
-        WHEN INSTR(m.member, ' ') > 0 
-        THEN SUBSTRING(m.member, INSTR(m.member, ' ') + 1)
-        ELSE NULL
-    END AS last_name,
-    m.email,
-    CONCAT(c.dial_code, m.phone) AS contact_number,
-    c.id AS country_id,
-    'ACTIVE' AS status,
-    CASE 
-        WHEN m.gender = 'M' THEN 'MALE'
-        WHEN m.gender = 'F' THEN 'FEMALE'
-        ELSE NULL
-    END AS gender,
-    m.birthDay,
-    ? AS batch_no,
-    a.id AS created_by,
-    a.id AS last_updated_by,
-    m.membershipCode as customer_code
-FROM
-    member m
-LEFT JOIN admins a ON m.sales = a.first_name
-LEFT JOIN countries c ON c.name = m.nationality`,
-              [ BATCH_CONFIG.CUSTOMERS_BATCH]
-            );
+        // 1. First insert into customers table
+        const customerInsertResult = await conn.query(`
+            INSERT INTO customers (
+                first_name,
+                last_name,
+                email,
+                contact_number,
+                country_id,
+                status,
+                gender,
+                dob,
+                batch_no,
+                created_by,
+                last_updated_by,
+                customer_code
+            )
+            SELECT
+                SUBSTRING_INDEX(m.member, ' ', 1) AS first_name,
+                CASE 
+                    WHEN INSTR(m.member, ' ') > 0 
+                    THEN SUBSTRING(m.member, INSTR(m.member, ' ') + 1)
+                    ELSE NULL
+                END AS last_name,
+                m.email,
+                CONCAT(c.dial_code, m.phone) AS contact_number,
+                c.id AS country_id,
+                'ACTIVE' AS status,
+                CASE 
+                    WHEN m.gender = 'M' THEN 'MALE'
+                    WHEN m.gender = 'F' THEN 'FEMALE'
+                    ELSE NULL
+                END AS gender,
+                m.birthDay,
+                ? AS batch_no,
+                a.id AS created_by,
+                a.id AS last_updated_by,
+                m.membershipCode as customer_code
+            FROM
+                member m
+            LEFT JOIN admins a ON m.sales = a.first_name
+            LEFT JOIN countries c ON c.name = m.nationality`,
+            [BATCH_CONFIG.CUSTOMERS_BATCH]
+        );
 
-            console.log(`Inserted ${customerInsertResult.affectedRows} records into customers table`);
+        console.log(`Inserted ${customerInsertResult.affectedRows} records into customers table`);
 
-            // 2. Now insert corresponding records into leads table
+        // Get the inserted customer IDs
+        const insertedCustomers = await conn.query(`
+            SELECT id, customer_code FROM customers 
+            WHERE batch_no = ? 
+            ORDER BY id DESC 
+            LIMIT ?`,
+            [BATCH_CONFIG.CUSTOMERS_BATCH, customerInsertResult.affectedRows]
+        );
+
+        // 2. Insert corresponding records into leads table
+        let leadsInserted = 0;
+        for (const customer of insertedCustomers) {
             const leadInsertResult = await conn.query(`
                 INSERT INTO leads (
                     first_name,
@@ -459,7 +470,7 @@ LEFT JOIN countries c ON c.name = m.nationality`,
                     NOW() AS created_at,
                     NOW() AS updated_at,
                     c.created_by, 
-                    c.last_updated_by ,
+                    c.last_updated_by,
                     c.created_by,
                     c.dob,
                     c.gender,
@@ -467,31 +478,46 @@ LEFT JOIN countries c ON c.name = m.nationality`,
                     'NEW_MEMBER' as lead_status
                 FROM customers c
                 LEFT JOIN countries co ON c.country_id = co.id
-                WHERE c.batch_no = ?
-                AND NOT EXISTS (
-                    SELECT 1 FROM leads l WHERE l.customer_id = c.id
-                )
-            `, [DEFAULT_VALUES.DEFAULT_SOURCE, BATCH_CONFIG.LEADS_BATCH, DEFAULT_VALUES.GYM_ID, BATCH_CONFIG.CUSTOMERS_BATCH]);
+                WHERE c.id = ?
+            `, [
+                DEFAULT_VALUES.DEFAULT_SOURCE, 
+                BATCH_CONFIG.LEADS_BATCH, 
+                DEFAULT_VALUES.GYM_ID, 
+                customer.id
+            ]);
 
-            console.log(`Inserted ${leadInsertResult.affectedRows} corresponding records into leads table`);
-
-            // Commit transaction
-            await conn.commit();
-
-            return {
-                customers: customerInsertResult.affectedRows,
-                leads: leadInsertResult.affectedRows
-            };
-            
-        } catch (err) {
-            // Rollback transaction if error occurs
-            if (conn) await conn.rollback();
-            console.error('Error migrating member data:', err);
-            throw err;
-        } finally {
-            if (conn) conn.release();
+            if (leadInsertResult.affectedRows > 0) {
+                leadsInserted++;
+                
+                // 3. Update customer with lead_id
+                await conn.query(`
+                    UPDATE customers 
+                    SET lead_id = ? 
+                    WHERE id = ?`,
+                    [leadInsertResult.insertId, customer.id]
+                );
+            }
         }
+
+        console.log(`Inserted ${leadsInserted} corresponding records into leads table`);
+
+        // Commit transaction
+        await conn.commit();
+
+        return {
+            customers: customerInsertResult.affectedRows,
+            leads: leadsInserted
+        };
+        
+    } catch (err) {
+        // Rollback transaction if error occurs
+        if (conn) await conn.rollback();
+        console.error('Error migrating member data:', err);
+        throw err;
+    } finally {
+        if (conn) conn.release();
     }
+}
     /**
      * Migrate data from imported_leads to leads table
      */
@@ -501,87 +527,116 @@ async migrateImportedLeads() {
         conn = await this.pool.getConnection();
         await conn.beginTransaction();
 
-        console.time("Insert Customers");
-        const customerResult = await conn.query(`
-            INSERT INTO customers (
-                first_name, last_name, email, contact_number,
-                batch_no, status, gender, created_by,
-                last_updated_by, country_id 
-            )
+        // 1. First identify records to process (avoid duplicates)
+        const recordsToProcess = await conn.query(`
             SELECT 
-                SUBSTRING_INDEX(il.name, ' ', 1),
-                TRIM(SUBSTRING(il.name, LOCATE(' ', il.name) + 1)),
-                il.emailAddress,
-                CONCAT(c.dial_code, il.mobileNumber),
-                ?,
-                'ACTIVE',
-                'RATHER_NOT_SAY',
-                a.id,
-                a.id,
-                c.id
+                il.*,
+                c.dial_code,
+                c.id as country_id,
+                a.id as admin_id
             FROM imported_leads il
-            LEFT JOIN admins a ON il.salesPerson = a.first_name
             LEFT JOIN countries c ON il.nationality = c.name
+            LEFT JOIN admins a ON il.salesPerson = a.first_name
             WHERE NOT EXISTS (
                 SELECT 1 FROM customers 
                 WHERE contact_number = CONCAT(c.dial_code, il.mobileNumber)
-            
-                );
-        `, [BATCH_CONFIG.LEADS_BATCH]);
-        console.timeEnd("Insert Customers");
-
-        console.time("Insert Leads");
-        const leadsResult = await conn.query(`
-            INSERT INTO leads (
-                first_name, last_name, email, phone_number,
-                nationality, source, batch_no, created_by,
-                last_updated_by, lead_created_by, lead_type, gym_id,
-                lead_status, country_id
-            )
-            SELECT 
-                SUBSTRING_INDEX(il.name, ' ', 1),
-                TRIM(SUBSTRING(il.name, LOCATE(' ', il.name) + 1)),
-                il.emailAddress,
-                CONCAT(c.dial_code, il.mobileNumber),
-                il.nationality,
-                il.leadSource,
-                ?,
-                a.id,
-                a.id,
-                a.id,
-                CASE 
-                    WHEN il.leadType = 'WI' THEN 'WALK_IN'
-                    WHEN il.leadType = 'MARKETING' THEN 'MARKETING'
-                    WHEN il.leadType = 'Tel' THEN 'TELEPHONE_ENQUIRY'
-                    WHEN il.leadType = 'MS Self Generated' THEN 'SELF_GENERATED'
-                    ELSE NULL
-                END,
-                ?,
-                'HOT',
-                c.id
-            FROM imported_leads il
-            LEFT JOIN admins a ON il.salesPerson = a.first_name
-            LEFT JOIN countries c ON il.nationality = c.name
-            WHERE NOT EXISTS (
+            ) OR NOT EXISTS (
                 SELECT 1 FROM leads 
                 WHERE phone_number = CONCAT(c.dial_code, il.mobileNumber)
-                AND batch_no = ?
-            );
-        `, [BATCH_CONFIG.LEADS_BATCH, DEFAULT_VALUES.GYM_ID, BATCH_CONFIG.LEADS_BATCH]);
-        console.timeEnd("Insert Leads");
-
-        console.time("Update Customer ID in Leads");
-        const updateResult = await conn.query(`
-            UPDATE leads l
-            INNER JOIN customers c ON l.phone_number = c.contact_number
-            SET l.customer_id = c.id
-            WHERE l.customer_id IS NULL;
+            )
         `);
-        console.timeEnd("Update Customer ID in Leads");
+
+        // 2. Process records one by one to ensure proper relationships
+        let customersCreated = 0;
+        let leadsCreated = 0;
+        const processedNumbers = new Set();
+
+        for (const record of recordsToProcess) {
+            const fullPhoneNumber = `${record.dial_code}${record.mobileNumber}`;
+            
+            // Skip if we've already processed this number
+            if (processedNumbers.has(fullPhoneNumber)) continue;
+            processedNumbers.add(fullPhoneNumber);
+
+            // Check if customer already exists
+            const existingCustomer = await conn.query(`
+                SELECT id FROM customers 
+                WHERE contact_number = ?
+                LIMIT 1
+            `, [fullPhoneNumber]);
+
+            let customerId;
+            
+            // Insert customer if doesn't exist
+            if (!existingCustomer.length) {
+                const customerResult = await conn.query(`
+                    INSERT INTO customers (
+                        first_name, last_name, email, contact_number,
+                        batch_no, status, gender, created_by,
+                        last_updated_by, country_id
+                    ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', 'RATHER_NOT_SAY', ?, ?, ?)
+                `, [
+                    record.name.split(' ')[0],
+                    record.name.split(' ').slice(1).join(' '),
+                    record.emailAddress,
+                    fullPhoneNumber,
+                    BATCH_CONFIG.LEADS_BATCH,
+                    record.admin_id,
+                    record.admin_id,
+                    record.country_id
+                ]);
+                customerId = customerResult.insertId;
+                customersCreated++;
+            } else {
+                customerId = existingCustomer[0].id;
+            }
+
+            // Check if lead already exists
+            const existingLead = await conn.query(`
+                SELECT id FROM leads 
+                WHERE phone_number = ?
+                LIMIT 1
+            `, [fullPhoneNumber]);
+
+            // Insert lead if doesn't exist
+            if (!existingLead.length) {
+                const leadResult = await conn.query(`
+                    INSERT INTO leads (
+                        first_name, last_name, email, phone_number,
+                        nationality, source, batch_no, created_by,
+                        last_updated_by, lead_created_by, lead_type, gym_id,
+                        lead_status, country_id, customer_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'HOT', ?, ?)
+                `, [
+                    record.name.split(' ')[0],
+                    record.name.split(' ').slice(1).join(' '),
+                    record.emailAddress,
+                    fullPhoneNumber,
+                    record.nationality,
+                    record.leadSource,
+                    BATCH_CONFIG.LEADS_BATCH,
+                    record.admin_id,
+                    record.admin_id,
+                    record.admin_id,
+                    this.mapLeadType(record.leadType),
+                    DEFAULT_VALUES.GYM_ID,
+                    record.country_id,
+                    customerId
+                ]);
+                leadsCreated++;
+
+                // Update customer with lead_id
+                await conn.query(`
+                    UPDATE customers 
+                    SET lead_id = ? 
+                    WHERE id = ?
+                `, [leadResult.insertId, customerId]);
+            }
+        }
 
         await conn.commit();
-        console.log(`Successfully migrated ${customerResult.affectedRows} customers and ${leadsResult.affectedRows} leads`);
-        return { customerResult, leadsResult, updateResult };
+        console.log(`Successfully created ${customersCreated} customers and ${leadsCreated} leads`);
+        return { customersCreated, leadsCreated };
 
     } catch (err) {
         if (conn) await conn.rollback();
@@ -590,6 +645,17 @@ async migrateImportedLeads() {
     } finally {
         if (conn) conn.release();
     }
+}
+
+// Helper function to map lead types
+mapLeadType(leadType) {
+    const mapping = {
+        'WI': 'WALK_IN',
+        'MARKETING': 'MARKETING',
+        'Tel': 'TELEPHONE_ENQUIRY',
+        'MS Self Generated': 'SELF_GENERATED'
+    };
+    return mapping[leadType] || null;
 }
 
 
